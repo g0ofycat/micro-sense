@@ -136,21 +136,25 @@ def load_font() -> FontType.FreeTypeFont | FontType.ImageFont:
 
 
 FONT: Final = load_font()
-_cache: dict[tuple[str, int], Image.Image] = {}
+_cache: dict[tuple[str, int, bool], Image.Image] = {}
 
 
-def make_icon(letter: str, step: int) -> Image.Image:
-    """Create a tray icon; step ranges from 0 (white) to 15 (full red)."""
+def make_icon(letter: str, step: int, lead: bool = False) -> Image.Image:
+    """Create a tray icon; step ranges from 0 (white) to 15 (full red).
+
+    lead=True adds a green outline (this side is the louder one).
+    """
     if len(letter) != 1:
         raise ValueError("letter must contain exactly one character")
     step = min(15, max(0, int(step)))
-    key = (letter, step)
+    key = (letter, step, lead)
     if key not in _cache:
         f = step / 15
         g = int(255 * (1 - f))
         img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
         dr = ImageDraw.Draw(img)
-        dr.rounded_rectangle((2, 2, 62, 62), radius=10, fill=(255, g, g, 255))
+        dr.rounded_rectangle((2, 2, 62, 62), radius=10, fill=(255, g, g, 255),
+                             outline=(0, 200, 0, 255) if lead else None, width=6)
         dr.text((32, 33), letter, font=FONT, fill=(40, 40, 40, 255), anchor="mm")
         _cache[key] = img
     return _cache[key]
@@ -199,7 +203,7 @@ def main() -> None:
     def updater() -> None:
         """Smooth captured levels and update both tray icons."""
         smooth = [0.0, 0.0]
-        last = [-1, -1]
+        last: list[tuple[int, bool] | None] = [None, None]
         while running.is_set():
             with lock:
                 raw = list(levels)
@@ -207,10 +211,12 @@ def main() -> None:
                 f = to_fraction(raw[i])
                 smooth[i] = f if f > smooth[i] else smooth[i] - 0.08
                 smooth[i] = max(0.0, smooth[i])
-                step = int(round(smooth[i] * 15))
-                if step != last[i]:
-                    last[i] = step
-                    icons[i].icon = make_icon("LR"[i], step)
+            steps = [int(round(s * 15)) for s in smooth]
+            for i in (0, 1):
+                state = (steps[i], steps[i] > steps[1 - i])
+                if state != last[i]:
+                    last[i] = state
+                    icons[i].icon = make_icon("LR"[i], *state)
             time.sleep(0.05)
 
     def watcher() -> None:
