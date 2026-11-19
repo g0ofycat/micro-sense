@@ -5,20 +5,34 @@ import os
 import sys
 import threading
 import time
+import tkinter as tk
 import winreg
+from ctypes import wintypes
 from typing import Final
 
 import numpy as np
 import pyaudiowpatch as pyaudio
 import pystray
-from PIL import Image, ImageDraw, ImageFont, ImageFont as FontType
+from PIL import Image, ImageDraw, ImageFont, ImageFont as FontType, ImageTk
 
 DB_FLOOR: Final = 50.0
-SENSITIVITY: Final = 3.0
+SENSITIVITY: Final = 5.0
+GWL_EXSTYLE: Final = -20
+WS_EX_TRANSPARENT: Final = 0x00000020
+WS_EX_TOOLWINDOW: Final = 0x00000080
+WS_EX_LAYERED: Final = 0x00080000
+WS_EX_NOACTIVATE: Final = 0x08000000
+LWA_COLORKEY: Final = 0x00000001
+LWA_ALPHA: Final = 0x00000002
+INDICATOR_SIZE: Final = 24
+TRANSPARENT_COLOR: Final = "#010203"
+TRANSPARENT_COLORREF: Final = 0x00030201
+SECOND_ICON_START_DELAY: Final = 0.35
 
 RUN_KEY: Final = r"Software\Microsoft\Windows\CurrentVersion\Run"
 APP_NAME: Final = "micro-sense"
 levels: list[float] = [0.0, 0.0]
+display_levels: list[float] = [0.0, 0.0]
 lock = threading.Lock()
 _mutex: object | None = None
 
@@ -160,6 +174,80 @@ def make_icon(letter: str, step: int, lead: bool = False) -> Image.Image:
     return _cache[key]
 
 
+def make_direction_indicator(
+    root: tk.Tk,
+    y: int,
+) -> tuple[tk.Toplevel, ImageTk.PhotoImage]:
+    """Create a transparent, click-through window with a red circle."""
+    scale = 4
+    image = Image.new(
+        "RGB",
+        (INDICATOR_SIZE * scale, INDICATOR_SIZE * scale),
+        (1, 2, 3),
+    )
+    ImageDraw.Draw(image).ellipse(
+        (5 * scale, 5 * scale, 19 * scale, 19 * scale),
+        fill="#ff3030",
+    )
+    image = image.resize((INDICATOR_SIZE, INDICATOR_SIZE), Image.Resampling.LANCZOS)
+    circle = ImageTk.PhotoImage(image, master=root)
+
+    window = tk.Toplevel(root)
+    window.overrideredirect(True)
+    window.attributes("-topmost", True)
+    window.geometry(f"{INDICATOR_SIZE}x{INDICATOR_SIZE}+12+{y}")
+    canvas = tk.Canvas(
+        window,
+        width=INDICATOR_SIZE,
+        height=INDICATOR_SIZE,
+        background=TRANSPARENT_COLOR,
+        highlightthickness=0,
+    )
+    canvas.pack()
+    canvas.create_image(0, 0, image=circle, anchor="nw")
+
+    window.update_idletasks()
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    user32.GetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int]
+    user32.GetWindowLongW.restype = ctypes.c_long
+    user32.SetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_long]
+    user32.SetWindowLongW.restype = ctypes.c_long
+    user32.SetLayeredWindowAttributes.argtypes = [
+        wintypes.HWND,
+        wintypes.COLORREF,
+        ctypes.c_ubyte,
+        wintypes.DWORD,
+    ]
+    user32.SetLayeredWindowAttributes.restype = wintypes.BOOL
+    hwnd = wintypes.HWND(int(window.wm_frame(), 0))
+    ctypes.set_last_error(0)
+    style = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+    if style == 0 and ctypes.get_last_error():
+        raise ctypes.WinError()
+    ctypes.set_last_error(0)
+    user32.SetWindowLongW(
+        hwnd,
+        GWL_EXSTYLE,
+        style
+        | WS_EX_TRANSPARENT
+        | WS_EX_TOOLWINDOW
+        | WS_EX_LAYERED
+        | WS_EX_NOACTIVATE,
+    )
+    if ctypes.get_last_error():
+        raise ctypes.WinError()
+    ctypes.set_last_error(0)
+    if not user32.SetLayeredWindowAttributes(
+        hwnd,
+        TRANSPARENT_COLORREF,
+        230,
+        LWA_COLORKEY | LWA_ALPHA,
+    ):
+        raise ctypes.WinError()
+    window.withdraw()
+    return window, circle
+
+
 def default_loopback_name() -> str | None:
     """Return the name of the current default loopback device, if any. For switched output devices"""
     p = pyaudio.PyAudio()
@@ -176,12 +264,23 @@ def main() -> None:
     if already_running():
         return
 
-    p, stream = start_audio()
-    device = default_loopback_name()
+    root = tk.Tk()
+    root.withdraw()
     running = threading.Event()
     running.set()
 
     icons = []
+    screen_width = root.winfo_screenwidth()
+    screen_height = root.winfo_screenheight()
+    indicator_y = (screen_height - INDICATOR_SIZE) // 2
+    indicator_window, indicator_image = make_direction_indicator(
+        root,
+        indicator_y,
+    )
+    indicator_visible = False
+    last_direction: int | None = None
+    p, stream = start_audio()
+    device = default_loopback_name()
 
     def quit_app(_icon: object = None, _item: object = None) -> None:
         """Stop the update thread and all tray icons."""
@@ -189,6 +288,7 @@ def main() -> None:
         running.clear()
         for tray_icon in icons:
             tray_icon.stop()
+        root.after(0, root.quit)
 
     menu = pystray.Menu(
         pystray.MenuItem("Start with Windows", toggle_autostart,
@@ -211,6 +311,8 @@ def main() -> None:
                 f = to_fraction(raw[i])
                 smooth[i] = f if f > smooth[i] else smooth[i] - 0.08
                 smooth[i] = max(0.0, smooth[i])
+            with lock:
+                display_levels[:] = smooth
             steps = [int(round(s * 15)) for s in smooth]
             for i in (0, 1):
                 state = (steps[i], steps[i] > steps[1 - i])
@@ -218,6 +320,35 @@ def main() -> None:
                     last[i] = state
                     icons[i].icon = make_icon("LR"[i], *state)
             time.sleep(0.05)
+
+    def update_direction_indicator() -> None:
+        """Show a red circle on the side with clearly louder audio."""
+        nonlocal indicator_visible, last_direction
+        with lock:
+            current = list(display_levels)
+        direction = None
+        if max(current) > 0.02:
+            if current[0] > current[1] + 0.03:
+                direction = 0
+            elif current[1] > current[0] + 0.03:
+                direction = 1
+
+        if direction is None:
+            if indicator_visible:
+                indicator_window.withdraw()
+                indicator_visible = False
+            last_direction = None
+        else:
+            if direction != last_direction:
+                x = 12 if direction == 0 else screen_width - INDICATOR_SIZE - 12
+                indicator_window.geometry(
+                    f"{INDICATOR_SIZE}x{INDICATOR_SIZE}+{x}+{indicator_y}"
+                )
+                last_direction = direction
+            if not indicator_visible:
+                indicator_window.deiconify()
+                indicator_visible = True
+        root.after(50, update_direction_indicator)
 
     def watcher() -> None:
         """Restart capture when the default output device changes."""
@@ -241,12 +372,35 @@ def main() -> None:
                 pass
 
     try:
-        icons[1].run_detached()
+        left_icon_ready = threading.Event()
+        right_icon_ready = threading.Event()
+
+        def show_right_icon(_icon: object) -> None:
+            icons[1].visible = True
+            right_icon_ready.set()
+
+        def show_left_icon(_icon: object) -> None:
+            if not right_icon_ready.wait(timeout=10):
+                raise TimeoutError("The right tray icon did not initialize")
+            time.sleep(SECOND_ICON_START_DELAY)
+            icons[0].visible = True
+            left_icon_ready.set()
+
+        icons[1].run_detached(setup=show_right_icon)
+        icons[0].run_detached(setup=show_left_icon)
+        if not right_icon_ready.wait(timeout=10):
+            raise TimeoutError("The right tray icon did not initialize")
+        if not left_icon_ready.wait(timeout=10):
+            raise TimeoutError("The left tray icon did not initialize")
         threading.Thread(target=updater, daemon=True).start()
         threading.Thread(target=watcher, daemon=True).start()
-        icons[0].run()
+        root.after(50, update_direction_indicator)
+        root.mainloop()
     finally:
         running.clear()
+        for tray_icon in icons:
+            tray_icon.stop()
+        root.destroy()
         stream.stop_stream()
         stream.close()
         p.terminate()

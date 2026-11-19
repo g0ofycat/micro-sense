@@ -42,6 +42,8 @@ Right-click either icon for:
 - **Start with Windows** (toggle)
 - **Quit**
 
+When one side is clearly louder, a small transparent red click-through circle appears at that screen edge. It hides when the levels are close or quiet.
+
 ## Tuning
 
 Edit these near the top of `src\micro_sense.py`, then rebuild:
