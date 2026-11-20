@@ -13,7 +13,7 @@ from typing import Final
 import numpy as np
 import pyaudiowpatch as pyaudio
 import pystray
-from PIL import Image, ImageDraw, ImageFont, ImageFont as FontType, ImageTk
+from PIL import Image, ImageDraw, ImageFont, ImageFont as FontType
 
 DB_FLOOR: Final = 50.0
 SENSITIVITY: Final = 5.0
@@ -176,35 +176,32 @@ def make_icon(letter: str, step: int, lead: bool = False) -> Image.Image:
 
 def make_direction_indicator(
     root: tk.Tk,
+    x: int,
     y: int,
-) -> tuple[tk.Toplevel, ImageTk.PhotoImage]:
-    """Create a transparent, click-through window with a red circle."""
-    scale = 4
-    image = Image.new(
-        "RGB",
-        (INDICATOR_SIZE * scale, INDICATOR_SIZE * scale),
-        (1, 2, 3),
-    )
-    ImageDraw.Draw(image).ellipse(
-        (5 * scale, 5 * scale, 19 * scale, 19 * scale),
-        fill="#ff3030",
-    )
-    image = image.resize((INDICATOR_SIZE, INDICATOR_SIZE), Image.Resampling.LANCZOS)
-    circle = ImageTk.PhotoImage(image, master=root)
-
+) -> tuple[tk.Toplevel, tk.Canvas, int, int]:
+    """Create paired, translucent, click-through directional arrows."""
+    width = INDICATOR_SIZE * 3
     window = tk.Toplevel(root)
     window.overrideredirect(True)
     window.attributes("-topmost", True)
-    window.geometry(f"{INDICATOR_SIZE}x{INDICATOR_SIZE}+12+{y}")
+    window.geometry(f"{width}x{INDICATOR_SIZE}+{x}+{y}")
     canvas = tk.Canvas(
         window,
-        width=INDICATOR_SIZE,
+        width=width,
         height=INDICATOR_SIZE,
         background=TRANSPARENT_COLOR,
         highlightthickness=0,
     )
     canvas.pack()
-    canvas.create_image(0, 0, image=circle, anchor="nw")
+    left_arrow = canvas.create_polygon(
+        5, 12, 12, 6, 12, 10, 19, 10, 19, 14, 12, 14, 12, 18,
+        fill="#777777", outline="",
+    )
+    right_arrow = canvas.create_polygon(
+        width - 5, 12, width - 12, 6, width - 12, 10, width - 19, 10,
+        width - 19, 14, width - 12, 14, width - 12, 18,
+        fill="#777777", outline="",
+    )
 
     window.update_idletasks()
     user32 = ctypes.WinDLL("user32", use_last_error=True)
@@ -240,12 +237,11 @@ def make_direction_indicator(
     if not user32.SetLayeredWindowAttributes(
         hwnd,
         TRANSPARENT_COLORREF,
-        230,
+        170,
         LWA_COLORKEY | LWA_ALPHA,
     ):
         raise ctypes.WinError()
-    window.withdraw()
-    return window, circle
+    return window, canvas, left_arrow, right_arrow
 
 
 def default_loopback_name() -> str | None:
@@ -273,11 +269,18 @@ def main() -> None:
     screen_width = root.winfo_screenwidth()
     screen_height = root.winfo_screenheight()
     indicator_y = (screen_height - INDICATOR_SIZE) // 2
-    indicator_window, indicator_image = make_direction_indicator(
+    indicator_width = INDICATOR_SIZE * 3
+    indicator_x = (screen_width - indicator_width) // 2
+    (
+        indicator_window,
+        indicator_canvas,
+        left_arrow,
+        right_arrow,
+    ) = make_direction_indicator(
         root,
+        indicator_x,
         indicator_y,
     )
-    indicator_visible = False
     last_direction: int | None = None
     p, stream = start_audio()
     device = default_loopback_name()
@@ -322,8 +325,8 @@ def main() -> None:
             time.sleep(0.05)
 
     def update_direction_indicator() -> None:
-        """Show a red circle on the side with clearly louder audio."""
-        nonlocal indicator_visible, last_direction
+        """Keep both arrows visible and brighten the side with louder audio."""
+        nonlocal last_direction
         with lock:
             current = list(display_levels)
         direction = None
@@ -333,21 +336,16 @@ def main() -> None:
             elif current[1] > current[0] + 0.03:
                 direction = 1
 
-        if direction is None:
-            if indicator_visible:
-                indicator_window.withdraw()
-                indicator_visible = False
-            last_direction = None
-        else:
-            if direction != last_direction:
-                x = 12 if direction == 0 else screen_width - INDICATOR_SIZE - 12
-                indicator_window.geometry(
-                    f"{INDICATOR_SIZE}x{INDICATOR_SIZE}+{x}+{indicator_y}"
-                )
-                last_direction = direction
-            if not indicator_visible:
-                indicator_window.deiconify()
-                indicator_visible = True
+        if direction != last_direction:
+            indicator_canvas.itemconfigure(
+                left_arrow,
+                fill="#ffffff" if direction == 0 else "#777777",
+            )
+            indicator_canvas.itemconfigure(
+                right_arrow,
+                fill="#ffffff" if direction == 1 else "#777777",
+            )
+            last_direction = direction
         root.after(50, update_direction_indicator)
 
     def watcher() -> None:
